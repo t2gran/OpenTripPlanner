@@ -5,7 +5,23 @@ import re
 import subprocess
 import sys
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+
+## ------------------------------------------------------------------------------------ ##
+##                                 Global constants                                     ##
+## ------------------------------------------------------------------------------------ ##
+
+POM_FILE_NAME = 'pom.xml'
+# GitHub label to indicate that a PR needs to be bumped
+LBL_BUMP_SER_VER_ID = 'bump serialization id'
+SER_VER_ID_PROPERTY = 'otp.serialization.version.id'
+SER_VER_ID_PROPERTY_PTN = SER_VER_ID_PROPERTY.replace('.', r'\.')
+SER_VER_ID_PATTERN = re.compile('<' + SER_VER_ID_PROPERTY_PTN + r'>\s*(.*)\s*</' + SER_VER_ID_PROPERTY_PTN + '>')
+STATE_FILE='.custom_release_resume_state.json'
+
+## ------------------------------------------------------------------------------------ ##
+##                                      Classes                                         ##
+## ------------------------------------------------------------------------------------ ##
 
 # Configuration read from the 'release_env.json' file
 @dataclass
@@ -13,15 +29,15 @@ class Config:
     upstream_remote : str = None
     release_remote : str = None
     release_branch : str = None
-    config_branch : str = None
+    ext_branches : list[str] = None
     include_prs_label : str = None
     ser_ver_id_prefix : str = None
 
-    def release_branch_path(self):
-        return f'{self.release_remote}/{self.release_branch}'
+    def release_path(self, branch):
+        return f'{self.release_remote}/{branch}'
 
-    def config_branch_path(self):
-        return f'{self.release_remote}/{self.config_branch}'
+    def release_branch_path(self):
+        return self.release_path(self.release_branch)
 
 # CLI Arguments and Options
 @dataclass
@@ -48,10 +64,12 @@ class ScriptState:
     current_ser_ver_id : str = None
     new_ser_ver_id : str = None
     major_version : str = None
-    current_full_version : str = None
+    current_version : str = None
     new_version :str = None
     prs_to_merge = {}
     prs_bump_ser_ver_id : bool = False
+    gotoStep : bool = False
+    step: str = None
 
     def new_version_tag(self):
         return f'v{self.new_version}'
@@ -60,16 +78,26 @@ class ScriptState:
         return f'Version {self.new_version} ({self.new_ser_ver_id})'
 
     def is_ser_ver_id_new(self):    
-        return self.new_ser_ver_id != self.current_ser_ver_id 
-        
-# Global constants
+        return self.new_ser_ver_id != self.current_ser_ver_id
 
-POM_FILE_NAME = "pom.xml"
-# GitHub label to indicate that a PR needs to be bumped
-LBL_BUMP_SER_VER_ID = 'bump serialization id'
-SER_VER_ID_PROPERTY = 'otp.serialization.version.id'
-SER_VER_ID_PROPERTY_PTN = SER_VER_ID_PROPERTY.replace('.', r'\.')
-SER_VER_ID_PATTERN = re.compile('<' + SER_VER_ID_PROPERTY_PTN + r'>\s*(.*)\s*</' + SER_VER_ID_PROPERTY_PTN + '>')
+    def run(self, step : str):
+        if(not self.gotoStep):
+            debug(f'Run step: {step}')
+            return True
+        if(self.step == step):
+            self.gotoStep = False
+            debug(f'Resume step: {step}')
+            return True
+        else:
+            debug(f'Skip step: {step}')
+            return False
+
+@dataclass
+class ScriptDto:
+    options : CliOptions = CliOptions()
+    config : Config = Config()
+    state = ScriptState = ScriptState()
+
 
 ## ------------------------------------------------------------------------------------ ##
 ##                                  Global Variables                                    ##
@@ -79,6 +107,9 @@ config : Config = None
 options : CliOptions = None
 state = ScriptState()
 
+## ------------------------------------------------------------------------------------ ##
+##                                        Main                                          ##
+## ------------------------------------------------------------------------------------ ##
 def main():
     setup_and_verify()
 
@@ -86,13 +117,14 @@ def main():
     if (not options.hotfix):
         reset_release_branch_to_base_revision()
         merge_in_labeled_PRs()
-        merge_in_config_branch()
+        merge_in_ext_branches()
         merge_in_old_release_with_no_changes()
 
+    run_maven_test()
     set_maven_pom_version()
     set_ser_ver_id()
+    delete_script_state()
     commit_new_versions()
-    # run_maven_test()
     tag_release()
     push_release_branch_and_tag()
 
@@ -103,17 +135,20 @@ def main():
 def setup_and_verify():
     section("Setting up release process and verifying the environment")
     parse_and_verify_cli_arguments_and_options()
-    load_config()
-    verify_script_run_from_root()
-    verify_git_installed()
-    verify_maven_installed()
-    verify_release_base_and_release_branch_exist()
-    verify_no_local_git_changes()
-    fetch_all_git_remotes()
-    resolve_version_number()
-    resolve_new_version()
-    list_labeled_PRs()
-    resolve_new_ser_ver_id()
+    if (os.path.exists(STATE_FILE)):
+        resume()
+    else:
+        load_config()
+        verify_script_run_from_root()
+        verify_git_installed()
+        verify_maven_installed()
+        verify_release_base_and_release_branch_exist()
+        verify_no_local_git_changes()
+        fetch_all_git_remotes()
+        resolve_version_number()
+        resolve_new_version()
+        list_labeled_PRs()
+        resolve_new_ser_ver_id()
     print_setup()
 
 def reset_release_branch_to_base_revision():
@@ -125,17 +160,19 @@ def merge_in_labeled_PRs():
     for pr in state.prs_to_merge:
         # A temp branch is needed here since the PR is in the upstream remote repo
         temp_branch=f'temp-pullrequest-{pr}'
-        git('fetch', config.upstream_remote, f'pull/{pr}/head:{temp_branch}')
-        git_im('merge', temp_branch)
-        git('branch', '-D', temp_branch)
+        if(section_w_resume(temp_branch, "Merge in PR #{pr}")):
+            git('fetch', config.upstream_remote, f'pull/{pr}/head:{temp_branch}')
+            git_im('merge', temp_branch)
+            git('branch', '-D', temp_branch)
 
-def merge_in_config_branch():
-    if(config.config_branch == None):
+def merge_in_ext_branches():
+    if(len(config.ext_branches) == 0):
         info('\nNo config branch configured, mering is skipped.')
         return
-    section("Merge in config branch ...")
-    git_im('merge', config.config_branch_path())
-    info(f'Config branch merged: {config.config_branch_path()}')
+    if(section_w_resume('merge_in_ext_branches', "Merge in config branch ...")):
+        for branch in config.ext_branches:
+            git_im('merge', config.release_path(branch))
+            info(f'Config branch merged: {config.release_path(branch)}')
 
 def set_maven_pom_version():
     section("Set Maven project version ...")
@@ -153,6 +190,12 @@ def set_ser_ver_id():
         output.write(pom_file)
     prefix = 'New' if(state.is_ser_ver_id_new()) else 'Same'
     info(f'{prefix} serialization.version.id set: {state.new_ser_ver_id}')
+
+# Delete the script state file - this avoid going into resume the nest time the
+# script is run.
+def delete_script_state():
+  execute('rm', '-f', STATE_FILE)
+
 
 def commit_new_versions():
     section("Commit new version with version and serialization version id set ...")
@@ -173,7 +216,6 @@ def push_release_branch_and_tag():
         f'v{state.new_version}',
         f'{config.release_branch}')
     info(f'Release pushed to: {config.release_branch_path()}')
-
 
 
 # Merge the old version into the new version. This only keep a reference to the old version, the
@@ -214,6 +256,26 @@ def parse_and_verify_cli_arguments_and_options():
     global options
     options = CliOptions(**opts)
     options.verify()
+
+def resume():
+    section('Resume')
+    print('''
+      Do you want to resume the previous execution of the script?
+       - You must first fix the merge conflict or unit-test failing.
+       - Then commit your changes.
+       - Then run this script again, the script will automatically resume the release process
+         at the same place it failed.
+
+      Do you want to resume the release process?
+    ''')
+    answer = 'answer'
+    p = re.compile(r'[\syYxX]')
+    while(not p.match(answer)):
+        answer = input("Press 'y' to continue, 'x' to exit: ")
+    if(answer == 'x'):
+        exit(0)
+    readScriptState()
+
 
 def load_config():
     section("Load configuration...")
@@ -357,14 +419,14 @@ def print_setup():
     info(f"  - Base revision for release ... : {options.base_revision}")
     info("CLI Options")
     info(f"  - Bump ser.ver.id ............. : {options.bump_ser_ver_id}")
-    info(f"  - Hotfix ...................... : {options.hotfix}")
     info(f"  - Dry run  .................... : {options.dry_run}")
     info(f"  - Debugging ................... : {options.debugging}")
+    info(f"  - Hotfix ...................... : {options.hotfix}")
     info("Config")
     info(f"  - Upstream git repo remote name : {config.upstream_remote}")
     info(f"  - Release to remote git repo .. : {config.release_remote}")
     info(f"  - Release branch .............. : {config.release_branch}")
-    info(f"  - Configuration branch ........ : {config.config_branch}")
+    info(f"  - Configuration branches ...... : {config.ext_branches}")
     info(f"  - Ser.ver.id prefix ........... : {config.ser_ver_id_prefix}")
     if(config.include_prs_label):
         info(f"PRs to merge")
@@ -372,11 +434,34 @@ def print_setup():
             info(f"  - {pr} with labels {state.prs_to_merge[pr]}")
     info(f"Release info")
     info(f"  - Project major version ....... : {state.major_version}")
-    info(f"  - Current full version ........ : {state.current_version}")
-    info(f"  - New full version ............ : {state.new_version}")
+    info(f"  - Current version ............. : {state.current_version}")
+    info(f"  - New version ................. : {state.new_version}")
     info(f"  - Current ser.ver.id .......... : {state.current_ser_ver_id}")
     info(f"  - New ser.ver.id .............. : {state.new_ser_ver_id}")
 
+
+## ------------------------------------------------------------------------------------ ##
+##                                        Resume                                        ##
+## ------------------------------------------------------------------------------------ ##
+
+def readScriptState():
+    info("The script will resume and print the state of the previous process.")
+    global options, config, state
+    with open(STATE_FILE, 'r') as f:
+        doc = json.load(f)
+        options = CliOptions(**doc['options'])
+        config = Config(**doc['config'])
+        state =  ScriptState(**doc['state'])
+        state.gotoStep = True
+
+def saveScriptState(step : str):
+    state.step = step
+    doc = {}
+    doc['options'] = asdict(options)
+    doc['config'] = asdict(config)
+    doc['state'] = asdict(state)
+    with open(STATE_FILE, 'w') as f:
+        json.dump(doc, f)
 
 ## ------------------------------------------------------------------------------------ ##
 ##                                   Utility functions                                  ##
@@ -421,9 +506,9 @@ def read_ser_ver_id_from_pom_file(git_hash):
     return m.group(1)
 
 def run_maven_test():
-    section('Run tests')
-    # Do not use execute here, this takes more than 10 seconds and we want the output to be piped
-    subprocess.run(['mvn', 'clean', 'test'])
+    if(section_w_resume('run_maven_test', 'Run unit tests')):
+        # Do not use execute here, this takes more than 10 seconds and we want the output to be piped
+        subprocess.run(['mvn', 'clean', 'test'])
 
 def git(*cmd, error=None):
     return execute('git', *cmd, errorMsg=error)
@@ -457,7 +542,17 @@ def execute(*cmd, quiet=True, quietErr=False, errorMsg=None, impact=False):
 ##                                     Log functions                                    ##
 ## ------------------------------------------------------------------------------------ ##
 
-def section(msg):
+def section_w_resume(step : str, msg : str) -> bool:
+    if(state.run(step)):
+        saveScriptState(step)
+        section(msg)
+        return True
+    else:
+        saveScriptState(step)
+        section(msg + "  (SKIP STEP)")
+        return False
+
+def section(msg : str):
     hr = "-------------------------------------------------------------------------------------------"
     print('')
     print(hr)
@@ -513,8 +608,8 @@ def help():
       --dryRun   : Run script locally, nothing is pushed to remote server.
       --hotfix   : Create a new release from the current local Git repo HEAD. It updates the
                    maven-project-version and the serialization-version-id, creates a new tag
-                   and push the release. You should apply all fixes and commit BEFORE running this
-                   script. Can not be used with the <base-revision> argument set.
+                   and push the release. You should apply all fixes and commit BEFORE running
+                   this script. Can not be used with the <base-revision> argument set.
       --serVerId : Force incrementation of the serialization version id.
       --skipPRs  : Skip PRs labeled with the configured 'include_prs_label'.
 
@@ -523,9 +618,19 @@ def help():
       # script/prepare_release.py 0715be88
       # script/prepare_release.py --dryRun --debug entur/my-feature-branch
       # script/prepare_release.py --hotfix --serVerId
+
+
+    Failure
+      If a release fails, you may resume the release process after fixing the problem by running
+      the custom-release script again. The script will automatically detect that the script failed
+      and resume the release. Typical errors are merge conflicts and unit-test failures. Remember
+      to commit you changes after the problem is fixed.
+
+      If you do not want to resume, an instead start over delete the {STATE_FILE} and run the
+      script again. You also need to delete the tag, if the release was tagged - this is last step
+      before the release is pushing to the remove git repo.
     """)
     exit(0)
 
 if __name__ == "__main__":
     main()
-

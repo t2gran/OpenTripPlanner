@@ -4,5 +4,5 @@
   "release_branch": "main_test",
   "ser_ver_id_prefix": "TG",
   "include_prs_label": "Entur Test",
-  "config_branch" : "ext_config_test"
+  "ext_branches" : [ "ext_config_test" ]
 }
