@@ -12,6 +12,7 @@ The scripts here can be used to release a fork of OTP. Run
 # script/release
 ```
 
+
 Process overview:
 
 - You specify the _base branch_, normally `dev-2.x` in git repo [`opentripplanner/OpenTripPlanner`](https://github.com/opentripplanner/OpenTripPlanner).
