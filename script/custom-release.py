@@ -180,9 +180,10 @@ def push_release_branch_and_tag():
 # resulting git tree of the merge is that of the new branch head, effectively ignoring all changes
 # from the old release. This create a continuous line of releases in the release branch.
 def merge_in_old_release_with_no_changes():
-    section("Merge the old version of into the new version - NO CHANGES COPIED OVER.")
+    section("Merge old release into the release branch ...")
     git_im('merge', '-s', 'ours', config.release_branch_path(), '-m',
-        "Merge old release into '{config.release_branch}' - NO CHANGES COPIED OVER")
+        'Merge old release into the release branch - NO CHANGES COPIED OVER')
+    info('Merged - NO CHANGES COPIED OVER')
 
 
 ## ------------------------------------------------------------------------------------ ##
