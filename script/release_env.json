@@ -1,0 +1,8 @@
+{
+  "upstream-remote": "otp",
+  "release-remote": "t2gran",
+  "release-branch": "main_test",
+  "serialization-prefix": "TG",
+  "include-pr-label": "Entur Test",
+  "config-branch" : "ext_config_test"
+}
