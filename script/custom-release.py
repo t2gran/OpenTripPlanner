@@ -16,36 +16,48 @@ SER_VER_ID_PROPERTY = 'otp.serialization.version.id'
 SER_VER_ID_PROPERTY_PTN = SER_VER_ID_PROPERTY.replace('.', r'\.')
 SER_VER_ID_PATTERN = re.compile('<' + SER_VER_ID_PROPERTY_PTN + r'>\s*(.*)\s*</' + SER_VER_ID_PROPERTY_PTN + '>')
 
+## ------------------------------------------------------------------------------------ ##
+##                                  Global Variables                                    ##
+## ------------------------------------------------------------------------------------ ##
 
-# Global variables
-
+## Config variables
 upstream_remote = None
-base_revision = None
 release_remote = None
 release_branch = None
-release_ser_prefix = None
-update_ser_ver_id = False
-new_ser_ver_id = None
-include_pr_label = None
 config_branch = None
+include_pr_label = None
+release_ser_prefix = None
+
+## Options
 dry_run = False
 debugging = False
+hotfix = False
+new_ser_ver_id = None
+
+## CLI Arguments
+base_revision = None
+
+## Control/computed variables
+update_ser_ver_id = False
 main_version = None
 current_full_version = None
 new_full_version = None
 pr_to_merge = {}
 
-
 def main():
     setup_and_verify()
-    reset_release_branch_to_base_revision()
-    merge_in_labeled_PRs()
-    merge_in_config_branch()
-    merge_in_old_release_with_no_changes()
+
+    # Prepare release
+    if (not hotfix):
+        reset_release_branch_to_base_revision()
+        merge_in_labeled_PRs()
+        merge_in_config_branch()
+        merge_in_old_release_with_no_changes()
+
     set_maven_pom_version(new_full_version)
     set_ser_ver_id_in_pom_file(new_ser_ver_id)
     commit_new_full_version()
-    run_maven_test()
+    # run_maven_test()
     tag_release()
     push_release_branch_and_tag()
 
@@ -65,8 +77,11 @@ def setup_and_verify():
     fetch_all_git_remotes()
     resolve_version_number()
     resolve_new_full_version()
-    list_labeled_PRs()
-    resolve_new_ser_ver_id()
+
+
+    if(not hotfix):
+        list_labeled_PRs()
+        resolve_new_ser_ver_id()
     print_setup()
 
 def reset_release_branch_to_base_revision():
@@ -94,8 +109,8 @@ def commit_new_full_version():
     git_im('commit', '--all', '-m', f'Version {new_full_version} ({new_ser_ver_id})')
 
 def tag_release():
-    section("Tag release with {new_full_version} ...")
-    git_im('tag', '-a', f'v{new_full_version}' '-m', f'Version {new_full_version}')
+    section(f'Tag release with {new_full_version} ...')
+    git_im('tag', '-a', f'v{new_full_version}', '-m', f'Version {new_full_version}')
 
 def push_release_branch_and_tag():
     section("Push new release with pom.xml versions and new tag")
@@ -134,12 +149,19 @@ def verify_arguments():
         elif(re.match(r'(--debug)', arg)):
             global debugging
             debugging = True
+        elif(re.match(r'(--hotfix)', arg)):
+            global hotfix
+            hotfix = True
+        elif(re.match(r'(--serVerId)', arg)):
+            global new_ser_ver_id
+            new_ser_ver_id = True
         else:
             args.append(arg)
     if(len(args) == 0):
         error("No target revision provided.")
     global base_revision
-    base_revision = args[0]
+    if(not hotfix):
+        base_revision = args[0]
 
 def load_config():
     section("Load configuration...")
@@ -157,12 +179,19 @@ def load_config():
         include_pr_label = doc['include-pr-label']
         release_ser_prefix = doc['serialization-prefix']
         config_branch = doc['config-branch']
+    if(hotfix):
+        base_revision = qualified_branch(release_branch)
+
     if(len(release_ser_prefix) != 2):
         error(f"Configure the 'serialization-prefix'. The prefix must be exactly two characters long. Value: <{release_ser_prefix}>")
 
+
 def verify_base_revision_and_release_branch_exist():
-    info("Verify base revision and release branch/commit exist ...")
-    git('rev-parse', '--quiet', '--verify', base_revision, error="Base revision not found!")
+    if(hotfix):
+        info("Verify base revision and release branch/commit exist ...")
+        git('rev-parse', '--quiet', '--verify', base_revision, error="Base revision not found!")
+    else:
+        info("Verify release branch/commit exist ...")
     git('rev-parse', '--quiet', '--verify', qualified_branch(release_branch), error="Release branch not found!")
 
 def verify_no_local_git_changes():
@@ -413,9 +442,9 @@ def help():
 
     Release process overview
       1. The <release branch> is reset hard to the <base-revision>.
-      2. Then the labeled PRs are merged into the release branch. [If 'include-pr-label' exist].
-      3. The 'ext_config' branch is rebased onto the release branch.
-      4. A new version and a serialization version id is updated in the pom.xml.
+      2. Then the labeled PRs are merged into the release branch. [If <include-pr-label> exist].
+      3. The <config branch> is rebased onto the release branch.
+      4. The pom.xml file is updated with a new version and a serialization version id.
       5. The release is tested, tagged and pushed to Git repo.
 
     See the RELEASE_README.md for more details.
@@ -431,10 +460,13 @@ def help():
       -h, --help : Print this help.
       --debug    : Run script with debug output enabled.
       --dryRun   : Run script locally, nothing is pushed to remote server.
+      --hotfix   : Create a new release of the <release branch>. Update version(s), tag and push.
+      --serVerId : Force incrementation of the serialization version id.
 
     Examples
       # script/prepare_release.py otp/dev-2.x
       # script/prepare_release.py --dryRun --debug otp/dev-2.x
+      # script/prepare_release.py --hotfix --serVerId
     """)
     exit(0)
 
