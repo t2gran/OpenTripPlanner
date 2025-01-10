@@ -7,7 +7,7 @@ import sys
 import json
 from dataclasses import dataclass
 
-
+# Configuration read from the 'release_env.json' file
 @dataclass
 class Config:
     upstream_remote : str = None
@@ -17,6 +17,47 @@ class Config:
     include_prs_label : str = None
     ser_ver_id_prefix : str = None
 
+    def release_branch_path(self):
+        return f'{self.release_remote}/{self.release_branch}'
+
+    def config_branch_path(self):
+        return f'{self.release_remote}/{self.config_branch}'
+
+# CLI Arguments and Options
+@dataclass
+class CliOptions:
+    base_revision : str = None
+    dry_run : bool = False
+    debugging : bool = False
+    hotfix : bool = False
+    bump_ser_ver_id : bool = False
+    skip_prs : bool = False
+
+    def verify(self):
+        if(self.hotfix and self.base_revision):
+            error("No arguments allowed with option '--hotfix'")
+
+    # Return the script <base revision> argument if set, if not use "HEAD"(--hotfix)
+    def release_base(self):
+       return self.base_revision if(self.base_revision) else "HEAD"
+
+
+# The execution state of the script + the CLI arguments
+@dataclass
+class ScriptState:
+    current_ser_ver_id : str = None
+    new_ser_ver_id : str = None
+    major_version : str = None
+    current_full_version : str = None
+    new_version :str = None
+    prs_to_merge = {}
+    prs_bump_ser_ver_id : bool = False
+
+    def new_version_tag(self):
+        return f'v{self.new_version}'
+
+    def new_version_description(self):
+        return f'Version {self.new_version} ({self.new_ser_ver_id})'
 
 # Global constants
 
@@ -31,38 +72,23 @@ SER_VER_ID_PATTERN = re.compile('<' + SER_VER_ID_PROPERTY_PTN + r'>\s*(.*)\s*</'
 ##                                  Global Variables                                    ##
 ## ------------------------------------------------------------------------------------ ##
 
-## Config variables
-config = Config()
-
-## Options
-dry_run = False
-debugging = False
-hotfix = False
-new_ser_ver_id = None
-
-## CLI Arguments
-base_revision = None
-
-## Control/computed variables
-update_ser_ver_id = False
-main_version = None
-current_full_version = None
-new_full_version = None
-pr_to_merge = {}
+config : Config = None
+options : CliOptions = None
+state = ScriptState()
 
 def main():
     setup_and_verify()
 
     # Prepare release
-    if (not hotfix):
+    if (not options.hotfix):
         reset_release_branch_to_base_revision()
         merge_in_labeled_PRs()
         merge_in_config_branch()
         merge_in_old_release_with_no_changes()
 
-    set_maven_pom_version(new_full_version)
-    set_ser_ver_id_in_pom_file(new_ser_ver_id)
-    commit_new_full_version()
+    set_maven_pom_version()
+    set_ser_ver_id()
+    commit_new_versions()
     # run_maven_test()
     tag_release()
     push_release_branch_and_tag()
@@ -73,30 +99,27 @@ def main():
 
 def setup_and_verify():
     section("Setting up release process and verifying the environment")
-    verify_arguments()
+    parse_and_verify_cli_arguments_and_options()
     load_config()
     verify_script_run_from_root()
     verify_git_installed()
     verify_maven_installed()
-    verify_base_revision_and_release_branch_exist()
+    verify_release_base_and_release_branch_exist()
     verify_no_local_git_changes()
     fetch_all_git_remotes()
     resolve_version_number()
-    resolve_new_full_version()
-
-
-    if(not hotfix):
-        list_labeled_PRs()
-        resolve_new_ser_ver_id()
+    resolve_new_version()
+    list_labeled_PRs()
+    resolve_new_ser_ver_id()
     print_setup()
 
 def reset_release_branch_to_base_revision():
     section("Reset release branch to base revision ...")
-    git_im('checkout', '-B', config.release_branch, base_revision)
+    git_im('checkout', '-B', config.release_branch, options.base_revision)
 
 def merge_in_labeled_PRs():
     section("Merge in labeled PRs ...")
-    for pr in pr_to_merge:
+    for pr in state.prs_to_merge:
         # A temp branch is needed here since the PR is in the upstream remote repo
         temp_branch=f'temp-pullrequest-{pr}'
         git('fetch', config.upstream_remote, f'pull/{pr}/head:{temp_branch}')
@@ -108,26 +131,44 @@ def merge_in_config_branch():
         info('\nNo config branch configured, mering is skipped.')
         return
     section(f"Merge in config branch '{config.config_branch}' ...")
-    git_im('merge', qualified_branch(config.config_branch))
+    git_im('merge', config.config_branch_path())
 
-def commit_new_full_version():
+def set_maven_pom_version():
+    execute('mvn', 'versions:set', f'-DnewVersion={state.new_version}', '-DgenerateBackupPoms=false')
+
+def set_ser_ver_id():
+    new_ser_ver_id_element = f'<{SER_VER_ID_PROPERTY}>{state.new_ser_ver_id}</{SER_VER_ID_PROPERTY}>'
+    pom_file = None
+    with open(POM_FILE_NAME, 'r') as input:
+        pom_file = input.read()
+        pom_file = re.sub(SER_VER_ID_PATTERN, new_ser_ver_id_element, pom_file, 1)
+    with open(POM_FILE_NAME, 'w') as output:
+        output.write(pom_file)
+
+
+def commit_new_versions():
     section("Commit new version with version and serialization version id set ...")
-    git_im('commit', '--all', '-m', f'Version {new_full_version} ({new_ser_ver_id})')
+    git_im('commit', '--all', '-m', state.new_version_description())
 
 def tag_release():
-    section(f'Tag release with {new_full_version} ...')
-    git_im('tag', '-a', f'v{new_full_version}', '-m', f'Version {new_full_version}')
+    section(f'Tag release with {state.new_version} ...')
+    git_im('tag', '-a', state.new_version_tag(), '-m', state.new_version_description())
 
 def push_release_branch_and_tag():
     section("Push new release with pom.xml versions and new tag")
-    git_im('push', '-f', f'{config.release_remote}', f'v{new_full_version}', f'{config.release_branch}')
+    git_im(
+        'push',
+        '-f',
+        f'{config.release_remote}',
+        f'v{state.new_version}',
+        f'{config.release_branch}')
 
 # Merge the old version into the new version. This only keep a reference to the old version, the
 # resulting git tree of the merge is that of the new branch head, effectively ignoring all changes
 # from the old release. This create a continuous line of releases in the release branch.
 def merge_in_old_release_with_no_changes():
     section("Merge the old version of into the new version - NO CHANGES COPIED OVER.")
-    git_im('merge', '-s', 'ours', qualified_branch(config.release_branch), '-m',
+    git_im('merge', '-s', 'ours', config.release_branch_path(), '-m',
         "Merge old release into '{config.release_branch}' - NO CHANGES COPIED OVER")
 
 
@@ -135,33 +176,30 @@ def merge_in_old_release_with_no_changes():
 ##                                   Setup and verify                                   ##
 ## ------------------------------------------------------------------------------------ ##
 
-def verify_arguments():
+def parse_and_verify_cli_arguments_and_options():
+    opts = {}
     args=[]
     for arg in sys.argv[1:]:
         if(re.match(r'(-h|--help)', arg)):
             help()
         elif(re.match(r'(--dryRun)', arg)):
-            global dry_run
-            dry_run = True
+            opts['dry_run'] = True
         elif(re.match(r'(--debug)', arg)):
-            global debugging
-            debugging = True
+            opts['debugging'] = True
         elif(re.match(r'(--hotfix)', arg)):
-            global hotfix
-            hotfix = True
+            opts['hotfix'] = True
         elif(re.match(r'(--serVerId)', arg)):
-            global new_ser_ver_id
-            new_ser_ver_id = True
+            opts['bump_ser_ver_id'] = True
+        elif(re.match(r'(--skipPRs)', arg)):
+            opts['skip_prs'] = True
         else:
+            opts['base_revision'] = arg
             args.append(arg)
-    if(hotfix):
-        if(len(args) != 0):
-            error("No arguments allowed with option '--hotfix'")
-    else:
-        if(len(args) != 1):
-            error("Expected one argument, <base-revision>, but got: {args}")
-        global base_revision
-        base_revision = args[0]
+    if(len(args) > 1):
+        error("Expected one argument, <base-revision>, but got: {args}")
+    global options
+    options = CliOptions(**opts)
+    options.verify()
 
 def load_config():
     section("Load configuration...")
@@ -170,9 +208,6 @@ def load_config():
         doc = json.load(f)
         config =  Config(**doc)
         debug(f'Config loaded: {config}')
-    if(hotfix):
-        global base_revision
-        base_revision = qualified_branch(config.release_branch)
 
     if(len(config.ser_ver_id_prefix) != 2):
         error(f"Configure the 'ser_ver_id_prefix'. The prefix must be exactly two characters " +
@@ -189,14 +224,13 @@ def verify_maven_installed():
     execute('mvn', '--version', quiet=False)
 
 
-def verify_base_revision_and_release_branch_exist():
-    if(hotfix):
-        info("Verify base revision and release branch/commit exist ...")
-        git('rev-parse', '--quiet', '--verify', base_revision, error="Base revision not found!")
-    else:
+def verify_release_base_and_release_branch_exist():
+    if(options.hotfix):
         info("Verify release branch/commit exist ...")
-    git('rev-parse', '--quiet', '--verify', qualified_branch(config.release_branch),
-        error="Release branch not found!")
+    else:
+        info("Verify base revision and release branch/commit exist ...")
+        git('rev-parse', '--quiet', '--verify', options.release_base(), error="Base revision not found!")
+    git('rev-parse', '--quiet', '--verify', config.release_branch_path(), error="Release branch not found!")
 
 def verify_no_local_git_changes():
     info("Verify no local changes exist ...")
@@ -207,29 +241,27 @@ def fetch_all_git_remotes():
     git_im('fetch', '--all', error="Git fetch all remotes failed!")
 
 def resolve_version_number():
-    info(f"Resolve version number from base revision ...")
-    global main_version
-    main_version = read_version_from_pom_file(config.release_remote)
+    info(f"Resolve version number ...")
+    version_qualifier = config.release_remote
+    state.major_version = read_major_version_from_pom(version_qualifier, options.release_base())
 
-def resolve_new_full_version():
+def resolve_new_version():
     info("Resolve new version number ...")
-    global new_full_version
-    global current_full_version
     p = git('tag', '--list', '--sort=-v:refname', error="Fetch git tags failed!")
     tags = p.stdout.splitlines()
 
-    prefix = f"{main_version}-{config.release_remote}-"
+    prefix = f"{state.major_version}-{config.release_remote}-"
     pattern = re.compile("v" + prefix.replace('.', r'\.') + r"(\d+)")
     max_tag_version = max(
         (int(m.group(1)) for tag in tags if (m := pattern.match(tag))),
         default=0
     )
-    current_full_version = prefix + str(max_tag_version)
-    new_full_version = prefix + str(1 + max_tag_version)
+    state.current_version = prefix + str(max_tag_version)
+    state.new_version = prefix + str(1 + max_tag_version)
 
 def list_labeled_PRs():
-    if(not config.include_prs_label):
-        info("The 'include-pr-label' is not set in the release_env.json file. No GitHub PRs are merged.")
+    if(options.skip_prs or (not config.include_prs_label)):
+        info("Skip merging in GitHub PRs.")
         return
     info("Get PRs to include and their labels from GitHub - This requires authentication ...")
 
@@ -259,73 +291,84 @@ def list_labeled_PRs():
             lblName = label['name']
             if(ptn.match(lblName)):
                 pr_labels.append(lblName)
-        pr_to_merge[str(pr_number)] = pr_labels
+        state.prs_to_merge[str(pr_number)] = pr_labels
 
-    global update_ser_ver_id
-    update_ser_ver_id = any(LBL_BUMP_SER_VER_ID in labels for labels in pr_to_merge.values())
+    state.prs_bump_ser_ver_id = any(LBL_BUMP_SER_VER_ID in labels for labels in state.prs_to_merge.values())
 
 def resolve_new_ser_ver_id():
     info("Resolve the new serialization version id ...")
-    global new_ser_ver_id
-    global update_ser_ver_id
-    curr_release_hash = git_show_ref(make_git_tag(current_full_version))
+    curr_release_hash = git_show_ref(git_tag(state.current_version))
     curr_ser_ver_id = read_ser_ver_id_from_pom_file(curr_release_hash)
+    bump_ser_ver_id = options.bump_ser_ver_id
 
-    # If none of the PRs have the 'bump serialization id' label set, then compare the base revision
-    # with the last common ancestor for the base_revision and the release branch. If this revisions
-    # are the same, then the serialization version id should be the same.
-    if(not update_ser_ver_id):
-        info("  - Find ancestor serialization version id ...")
-        output = git('log', '-20', '--format=oneline', qualified_branch(config.release_branch)).stdout
-        for line in output.splitlines():
-            ancestor_hash = line.split()[0]
-            ancestor_ser_ver_id = read_ser_ver_id_from_pom_file(ancestor_hash)
-            if(not ancestor_ser_ver_id.startswith(config.ser_ver_id_prefix)):
-                break
+    # If none of the PRs have the 'bump serialization id' label set, then find the upstream
+    # serialization-version-id for the release-base and the current version. If these
+    # serialization-version-ids are different, then we need to bump the new release serialization
+    # version id. To find the *upstream* ids we step back in the git history looking for an id
+    # not matching the project serialization version id prefix - this is assumed to be the latest
+    # serialization version from the upstream project.
+    if(not bump_ser_ver_id):
+        info("  - Find upstream serialization version id for current release ...")
+        curr_upstream_id = find_upstream_ser_ver_id_in_history(curr_release_hash)
 
         info(f"  - Find base serialization version id ...")
-        base_hash = git_show_ref(base_revision)
-        base_ser_ver_id = read_ser_ver_id_from_pom_file(base_hash)
+        base_hash = git_show_ref(options.release_base())
+        base_upstream_id = find_upstream_ser_ver_id_in_history(base_hash)
 
         # Update serialization version id in release if serialization version id has changed
-        update_ser_ver_id = ancestor_ser_ver_id != base_ser_ver_id
-        info(f"  - Ancestor serialization.ver.id is {ancestor_ser_ver_id} and base is {base_ser_ver_id}")
+        bump_ser_ver_id = curr_upstream_id != base_upstream_id
+        info(f"  - The current upstream serialization.ver.id is {curr_upstream_id} " +
+            f"and the base upstream id is {base_upstream_id}.")
 
-    if(update_ser_ver_id):
-        new_ser_ver_id = make_new_ser_ver_id(curr_ser_ver_id)
+    state.current_ser_ver_id = curr_ser_ver_id
+    if (bump_ser_ver_id):
+        state.new_ser_ver_id = bump_release_ser_ver_id(curr_ser_ver_id)
     else:
-        new_ser_ver_id = curr_ser_ver_id
+        state.new_ser_ver_id = curr_ser_ver_id
+
+# Find the serialization-version-id for the upstream git project using the git log starting
+# with the given revision (abort if not found in previous 20 commits)
+def find_upstream_ser_ver_id_in_history(revision : str):
+    output = git('log', '-20', '--format=oneline', revision).stdout
+    for line in output.splitlines():
+        hash = line.split()[0]
+        id = read_ser_ver_id_from_pom_file(hash)
+        if(not id.startswith(config.ser_ver_id_prefix)):
+            return id
+    error(f"No ser.ver.id found for revision {revision} and previous 20 commits.")
 
 def print_setup():
     section("Configuration")
-    info(f"Options")
-    info(f"  - Dry run enabled ......... : {dry_run}")
-    info(f"  - Debugging enabled ....... : {debugging}")
-    info(f"Upstream Git repo")
-    info(f"  - Remote name ............. : {config.upstream_remote}")
-    info(f"Base for this release")
-    info(f"  - Revision ................ : {base_revision}")
-    info(f"Release")
-    info(f"  - Remote Git repo ......... : {config.release_remote}")
-    info(f"  - Branch .................. : {qualified_branch(config.release_branch)}")
-    info(f"  - Configuration branch .... : {qualified_branch(config.config_branch)}")
-    info(f"  - Ser.ver.prefix .......... : {config.ser_ver_id_prefix}")
-    info(f"  - Project main version .... : {main_version}")
-    info(f"  - Current full version .... : {current_full_version}")
-    info(f"  - New full version ........ : {new_full_version}")
-    info(f"  - Ser.ver.id incremented .. : {update_ser_ver_id}")
-    info(f"  - New ser.ver.id .......... : {new_ser_ver_id}")
+    info(f"CLI Arguments")
+    info(f"  - Base revision for release ... : {options.base_revision}")
+    info("CLI Options")
+    info(f"  - Bump ser.ver.id ............. : {options.bump_ser_ver_id}")
+    info(f"  - Hotfix ...................... : {options.hotfix}")
+    info(f"  - Dry run  .................... : {options.dry_run}")
+    info(f"  - Debugging ................... : {options.debugging}")
+    info("Config")
+    info(f"  - Upstream git repo remote name : {config.upstream_remote}")
+    info(f"  - Release to remote git repo .. : {config.release_remote}")
+    info(f"  - Release branch .............. : {config.release_branch}")
+    info(f"  - Configuration branch ........ : {config.config_branch}")
+    info(f"  - Ser.ver.id prefix ........... : {config.ser_ver_id_prefix}")
     if(config.include_prs_label):
         info(f"PRs to merge")
-    for pr in pr_to_merge:
-        info(f"  - {pr} with labels {pr_to_merge[pr]}")
+        for pr in state.prs_to_merge:
+            info(f"  - {pr} with labels {state.prs_to_merge[pr]}")
+    info(f"Release info")
+    info(f"  - Project major version ....... : {state.major_version}")
+    info(f"  - Current full version ........ : {state.current_version}")
+    info(f"  - New full version ............ : {state.new_version}")
+    info(f"  - Current ser.ver.id .......... : {state.current_ser_ver_id}")
+    info(f"  - New ser.ver.id .............. : {state.new_ser_ver_id}")
 
 
 ## ------------------------------------------------------------------------------------ ##
 ##                                   Utility functions                                  ##
 ## ------------------------------------------------------------------------------------ ##
 
-# Get the full git hash for a qualified full branch name or tag
+# Get the full git hash for a qualified branch name, tag or hash
 def git_show_ref(ref):
     if(re.compile(r"[0-9a-f]{40}").match(ref)):
         return ref
@@ -334,31 +377,27 @@ def git_show_ref(ref):
 
 
 # Create a tag name used in git for a given version
-def make_git_tag(version):
+def git_tag(version):
     return f"v{version}"
 
-# Fully qualified  branch name in release remote repo
-def qualified_branch(branch):
-    return f"{config.release_remote}/{branch}"
-
-def make_new_ser_ver_id(currentId):
+def bump_release_ser_ver_id(currentId):
     value = int(currentId[3:])
     v = config.ser_ver_id_prefix + "-{:04d}".format(value + 1)
-    debug(v)
+    debug(f"New serialization version id: {v}")
     return v
 
-def read_version_from_pom_file(qualifier_name):
-    pom_xml = execute('git', 'show', f"{base_revision}:{POM_FILE_NAME}").stdout
+def read_major_version_from_pom(version_qualifier : str, revision : str):
+    pom_xml = execute('git', 'show', f"{revision}:{POM_FILE_NAME}").stdout
     tokenPtn = re.compile(r'<version>(.*)</version>')
-    verPtn = re.compile(r'(\d+\.\d+\.\d+)-(' + qualifier_name + r'-\d+|SNAPSHOT)')
+    verPtn = re.compile(r'(\d+\.\d+\.\d+)-(' + version_qualifier + r'-\d+|SNAPSHOT)')
 
     # Find the first <version>... in the pom_file.
     m = tokenPtn.search(pom_xml)
     if(m):
-        print("Version found: " + m.group(1))
+        debug("Version found: " + m.group(1))
         m = verPtn.match(m.group(1).strip())
         if(m):
-            print("Main version number: " + m.group(1))
+            debug("Main version number: " + m.group(1))
             return m.group(1)
     error(f"Version not found in '{POM_FILE_NAME}'.")
 
@@ -367,32 +406,21 @@ def read_ser_ver_id_from_pom_file(git_hash):
     m = SER_VER_ID_PATTERN.search(pom_xml)
     return m.group(1)
 
-def set_ser_ver_id_in_pom_file(ser_ver_id):
-    new_ser_ver_id_property = f'<{SER_VER_ID_PROPERTY}>{new_ser_ver_id}</{SER_VER_ID_PROPERTY}>'
-    with open(POM_FILE_NAME, 'r') as input:
-        pom_file = input.read()
-        pom_file = re.sub(SER_VER_ID_PATTERN, new_ser_ver_id_property, pom_file, 1)
-        with open(POM_FILE_NAME, 'w') as output:
-            output.write(pom_file)
-
-def set_maven_pom_version(newMavenVersion):
-    execute('mvn', 'versions:set', f'-DnewVersion={newMavenVersion}', '-DgenerateBackupPoms=false')
-
 def run_maven_test():
     section('Run tests')
     # Do not use execute here, this takes more than 10 seconds and we want the output to be piped
     subprocess.run(['mvn', 'clean', 'test'])
 
-def git(*cmd, error=''):
+def git(*cmd, error=None):
     return execute('git', *cmd, errorMsg=error)
 
 # Git impact should be used if the command change or update the system, this command
 # is NOT run if the '--dryRun' flag is set.
-def git_im(*cmd, error=''):
+def git_im(*cmd, error=None):
     return execute('git', *cmd, errorMsg=error, impact=True)
 
 def execute(*cmd, quiet=True, quietErr=False, errorMsg=None, impact=False):
-    if(dry_run and impact):
+    if(options.dry_run and impact):
         info(f"=> {cmd}  (--dryRun SKIPPED)")
         return
     debug(f"Run command: {cmd}")
@@ -404,11 +432,12 @@ def execute(*cmd, quiet=True, quietErr=False, errorMsg=None, impact=False):
     if(p.stderr and not quietErr):
         info(p.stderr)
     if(p.returncode != 0):
-        if(errorMsg == None):
-            error(f"Command {cmd} failed.")
-        else:
+        if(errorMsg):
             error(f"{errorMsg} Command {cmd} failed.")
+        else:
+            error(f"Command {cmd} failed.")
     return p
+
 
 ## ------------------------------------------------------------------------------------ ##
 ##                                     Log functions                                    ##
@@ -430,7 +459,7 @@ def error(msg):
     exit(1)
 
 def debug(msg):
-    if(debugging):
+    if(options.debugging):
         print(f"DEBUG {msg}")
 
 
@@ -441,35 +470,44 @@ def debug(msg):
 def help():
     section("Help")
     print (f"""
-    This script take ONE argument <base-revision>, the base branch or commit to use for the
-    release.
+    This script is used to create a new release in a downstream fork of OTP. It will set both
+    the Maven version(2.7.0-entur-23) and the serialization-version-id(EN-0020) to a unique id
+    using the fork project name. For the script to work the git remote name must match the
+    GitHub 'owner' name.
 
     Release process overview
-      1. The <release branch> is reset hard to the <base-revision>.
-      2. Then the labeled PRs are merged into the release branch. [If <include-pr-label> exist].
-      3. The <config branch> is rebased onto the release branch.
-      4. The pom.xml file is updated with a new version and a serialization version id.
+      1. The configured release-branch is reset hard to the <base-revision>.
+      2. Then the labeled PRs are merged into the release-branch, if configured.
+      3. The config-branch is rebased onto the release-branch.
+      4. The pom.xml file is updated with a new version and serialization version id.
       5. The release is tested, tagged and pushed to Git repo.
 
     See the RELEASE_README.md for more details.
 
     Usage
-      script/prepare_release.py [options] <base-revision>
+      script/prepare_release.py [options] [<base-revision>]
 
     Arguments
-        <base-revision> : The base branch or commit to use for the release. The 'otp/dev-2.x'
-                          is the most common base branch to use.
+        <base-revision> : The base branch or commit to use as the base for the release. The
+                          'otp/dev-2.x' is the most common base branch to use, but you can
+                          create a new release on top of any <commit>.
+                          This parameter is required unless option --hotfix is used.
 
     Options
       -h, --help : Print this help.
       --debug    : Run script with debug output enabled.
       --dryRun   : Run script locally, nothing is pushed to remote server.
-      --hotfix   : Create a new release of the <release branch>. Update version(s), tag and push.
+      --hotfix   : Create a new release from the current local Git repo HEAD. It updates the
+                   maven-project-version and the serialization-version-id, creates a new tag
+                   and push the release. You should apply all fixes and commit BEFORE running this
+                   script. Can not be used with the <base-revision> argument set.
       --serVerId : Force incrementation of the serialization version id.
+      --skipPRs  : Skip PRs labeled with the configured 'include_prs_label'.
 
     Examples
       # script/prepare_release.py otp/dev-2.x
-      # script/prepare_release.py --dryRun --debug otp/dev-2.x
+      # script/prepare_release.py 0715be88
+      # script/prepare_release.py --dryRun --debug entur/my-feature-branch
       # script/prepare_release.py --hotfix --serVerId
     """)
     exit(0)
