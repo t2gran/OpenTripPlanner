@@ -59,6 +59,9 @@ class ScriptState:
     def new_version_description(self):
         return f'Version {self.new_version} ({self.new_ser_ver_id})'
 
+    def is_ser_ver_id_new(self):    
+        return self.new_ser_ver_id != self.current_ser_ver_id 
+        
 # Global constants
 
 POM_FILE_NAME = "pom.xml"
@@ -130,13 +133,17 @@ def merge_in_config_branch():
     if(config.config_branch == None):
         info('\nNo config branch configured, mering is skipped.')
         return
-    section(f"Merge in config branch '{config.config_branch}' ...")
+    section("Merge in config branch ...")
     git_im('merge', config.config_branch_path())
+    info(f'Config branch merged: {config.config_branch_path()}')
 
 def set_maven_pom_version():
+    section("Set Maven project version ...")
     execute('mvn', 'versions:set', f'-DnewVersion={state.new_version}', '-DgenerateBackupPoms=false')
+    info(f'New version set: {state.new_version}')
 
 def set_ser_ver_id():
+    section("Set serialization.version.id ...")
     new_ser_ver_id_element = f'<{SER_VER_ID_PROPERTY}>{state.new_ser_ver_id}</{SER_VER_ID_PROPERTY}>'
     pom_file = None
     with open(POM_FILE_NAME, 'r') as input:
@@ -144,15 +151,18 @@ def set_ser_ver_id():
         pom_file = re.sub(SER_VER_ID_PATTERN, new_ser_ver_id_element, pom_file, 1)
     with open(POM_FILE_NAME, 'w') as output:
         output.write(pom_file)
-
+    prefix = 'New' if(state.is_ser_ver_id_new()) else 'Same'
+    info(f'{prefix} serialization.version.id set: {state.new_ser_ver_id}')
 
 def commit_new_versions():
     section("Commit new version with version and serialization version id set ...")
     git_im('commit', '--all', '-m', state.new_version_description())
+    info(f'Commit done: {state.new_version_description()}')
 
 def tag_release():
     section(f'Tag release with {state.new_version} ...')
     git_im('tag', '-a', state.new_version_tag(), '-m', state.new_version_description())
+    info(f'Tag done: {state.new_version_tag()}')
 
 def push_release_branch_and_tag():
     section("Push new release with pom.xml versions and new tag")
@@ -162,14 +172,18 @@ def push_release_branch_and_tag():
         f'{config.release_remote}',
         f'v{state.new_version}',
         f'{config.release_branch}')
+    info(f'Release pushed to: {config.release_branch_path()}')
+
+
 
 # Merge the old version into the new version. This only keep a reference to the old version, the
 # resulting git tree of the merge is that of the new branch head, effectively ignoring all changes
 # from the old release. This create a continuous line of releases in the release branch.
 def merge_in_old_release_with_no_changes():
-    section("Merge the old version of into the new version - NO CHANGES COPIED OVER.")
+    section("Merge old release into the release branch ...")
     git_im('merge', '-s', 'ours', config.release_branch_path(), '-m',
-        "Merge old release into '{config.release_branch}' - NO CHANGES COPIED OVER")
+        'Merge old release into the release branch - NO CHANGES COPIED OVER')
+    info('Merged - NO CHANGES COPIED OVER')
 
 
 ## ------------------------------------------------------------------------------------ ##
