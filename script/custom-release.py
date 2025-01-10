@@ -5,6 +5,17 @@ import re
 import subprocess
 import sys
 import json
+from dataclasses import dataclass
+
+
+@dataclass
+class Config:
+    upstream_remote : str = None
+    release_remote : str = None
+    release_branch : str = None
+    config_branch : str = None
+    include_prs_label : str = None
+    ser_ver_id_prefix : str = None
 
 
 # Global constants
@@ -21,12 +32,7 @@ SER_VER_ID_PATTERN = re.compile('<' + SER_VER_ID_PROPERTY_PTN + r'>\s*(.*)\s*</'
 ## ------------------------------------------------------------------------------------ ##
 
 ## Config variables
-upstream_remote = None
-release_remote = None
-release_branch = None
-config_branch = None
-include_pr_label = None
-release_ser_prefix = None
+config = Config()
 
 ## Options
 dry_run = False
@@ -68,10 +74,10 @@ def main():
 def setup_and_verify():
     section("Setting up release process and verifying the environment")
     verify_arguments()
+    load_config()
     verify_script_run_from_root()
     verify_git_installed()
     verify_maven_installed()
-    load_config()
     verify_base_revision_and_release_branch_exist()
     verify_no_local_git_changes()
     fetch_all_git_remotes()
@@ -86,23 +92,23 @@ def setup_and_verify():
 
 def reset_release_branch_to_base_revision():
     section("Reset release branch to base revision ...")
-    git_im('checkout', '-B', release_branch, base_revision)
+    git_im('checkout', '-B', config.release_branch, base_revision)
 
 def merge_in_labeled_PRs():
     section("Merge in labeled PRs ...")
     for pr in pr_to_merge:
         # A temp branch is needed here since the PR is in the upstream remote repo
         temp_branch=f'temp-pullrequest-{pr}'
-        git('fetch', upstream_remote, f'pull/{pr}/head:{temp_branch}')
+        git('fetch', config.upstream_remote, f'pull/{pr}/head:{temp_branch}')
         git_im('merge', temp_branch)
         git('branch', '-D', temp_branch)
 
 def merge_in_config_branch():
-    if(config_branch == None):
+    if(config.config_branch == None):
         info('\nNo config branch configured, mering is skipped.')
         return
-    section(f"Merge in config branch '{config_branch}' ...")
-    git_im('merge', qualified_branch(config_branch))
+    section(f"Merge in config branch '{config.config_branch}' ...")
+    git_im('merge', qualified_branch(config.config_branch))
 
 def commit_new_full_version():
     section("Commit new version with version and serialization version id set ...")
@@ -114,29 +120,20 @@ def tag_release():
 
 def push_release_branch_and_tag():
     section("Push new release with pom.xml versions and new tag")
-    git_im('push', '-f', f'{release_remote}', f'v{new_full_version}', f'{release_branch}')
+    git_im('push', '-f', f'{config.release_remote}', f'v{new_full_version}', f'{config.release_branch}')
 
 # Merge the old version into the new version. This only keep a reference to the old version, the
 # resulting git tree of the merge is that of the new branch head, effectively ignoring all changes
 # from the old release. This create a continuous line of releases in the release branch.
 def merge_in_old_release_with_no_changes():
     section("Merge the old version of into the new version - NO CHANGES COPIED OVER.")
-    git_im('merge', '-s', 'ours', qualified_branch(release_branch), '-m', "Merge old release into '{release_branch}' - NO CHANGES COPIED OVER")
+    git_im('merge', '-s', 'ours', qualified_branch(config.release_branch), '-m',
+        "Merge old release into '{config.release_branch}' - NO CHANGES COPIED OVER")
 
 
 ## ------------------------------------------------------------------------------------ ##
 ##                                   Setup and verify                                   ##
 ## ------------------------------------------------------------------------------------ ##
-
-def verify_script_run_from_root():
-    if(sys.argv[0] != "script/custom-release.py"):
-        error(f"Run script from root directory.")
-
-def verify_git_installed():
-    execute('git', '--version', quiet=False)
-
-def verify_maven_installed():
-    execute('mvn', '--version', quiet=False)
 
 def verify_arguments():
     args=[]
@@ -157,33 +154,39 @@ def verify_arguments():
             new_ser_ver_id = True
         else:
             args.append(arg)
-    if(len(args) == 0):
-        error("No target revision provided.")
-    global base_revision
-    if(not hotfix):
+    if(hotfix):
+        if(len(args) != 0):
+            error("No arguments allowed with option '--hotfix'")
+    else:
+        if(len(args) != 1):
+            error("Expected one argument, <base-revision>, but got: {args}")
+        global base_revision
         base_revision = args[0]
 
 def load_config():
     section("Load configuration...")
-    global upstream_remote
-    global release_remote
-    global release_branch
-    global include_pr_label
-    global release_ser_prefix
-    global config_branch
     with open("script/release_env.json", "r") as f:
+        global config
         doc = json.load(f)
-        upstream_remote = doc['upstream-remote']
-        release_remote = doc['release-remote']
-        release_branch = doc['release-branch']
-        include_pr_label = doc['include-pr-label']
-        release_ser_prefix = doc['serialization-prefix']
-        config_branch = doc['config-branch']
+        config =  Config(**doc)
+        debug(f'Config loaded: {config}')
     if(hotfix):
-        base_revision = qualified_branch(release_branch)
+        global base_revision
+        base_revision = qualified_branch(config.release_branch)
 
-    if(len(release_ser_prefix) != 2):
-        error(f"Configure the 'serialization-prefix'. The prefix must be exactly two characters long. Value: <{release_ser_prefix}>")
+    if(len(config.ser_ver_id_prefix) != 2):
+        error(f"Configure the 'ser_ver_id_prefix'. The prefix must be exactly two characters " +
+            "long. Value: <{config.ser_ver_id_prefix}>")
+
+def verify_script_run_from_root():
+    if(sys.argv[0] != "script/custom-release.py"):
+        error(f"Run script from root directory.")
+
+def verify_git_installed():
+    execute('git', '--version', quiet=False)
+
+def verify_maven_installed():
+    execute('mvn', '--version', quiet=False)
 
 
 def verify_base_revision_and_release_branch_exist():
@@ -192,7 +195,8 @@ def verify_base_revision_and_release_branch_exist():
         git('rev-parse', '--quiet', '--verify', base_revision, error="Base revision not found!")
     else:
         info("Verify release branch/commit exist ...")
-    git('rev-parse', '--quiet', '--verify', qualified_branch(release_branch), error="Release branch not found!")
+    git('rev-parse', '--quiet', '--verify', qualified_branch(config.release_branch),
+        error="Release branch not found!")
 
 def verify_no_local_git_changes():
     info("Verify no local changes exist ...")
@@ -205,7 +209,7 @@ def fetch_all_git_remotes():
 def resolve_version_number():
     info(f"Resolve version number from base revision ...")
     global main_version
-    main_version = read_version_from_pom_file(release_remote)
+    main_version = read_version_from_pom_file(config.release_remote)
 
 def resolve_new_full_version():
     info("Resolve new version number ...")
@@ -214,7 +218,7 @@ def resolve_new_full_version():
     p = git('tag', '--list', '--sort=-v:refname', error="Fetch git tags failed!")
     tags = p.stdout.splitlines()
 
-    prefix = f"{main_version}-{release_remote}-"
+    prefix = f"{main_version}-{config.release_remote}-"
     pattern = re.compile("v" + prefix.replace('.', r'\.') + r"(\d+)")
     max_tag_version = max(
         (int(m.group(1)) for tag in tags if (m := pattern.match(tag))),
@@ -224,7 +228,7 @@ def resolve_new_full_version():
     new_full_version = prefix + str(1 + max_tag_version)
 
 def list_labeled_PRs():
-    if(not include_pr_label):
+    if(not config.include_prs_label):
         info("The 'include-pr-label' is not set in the release_env.json file. No GitHub PRs are merged.")
         return
     info("Get PRs to include and their labels from GitHub - This requires authentication ...")
@@ -232,7 +236,7 @@ def list_labeled_PRs():
     # The query body needs to be on one line, for a unknown reason.
     queryText = 'query ReadOpenPullRequests { ' + \
             'repository(owner:\\"opentripplanner\\", name:\\"OpenTripPlanner\\") ' + \
-            '{ pullRequests(first: 100, states: OPEN, labels: \\"' + include_pr_label + '\\") ' + \
+            '{ pullRequests(first: 100, states: OPEN, labels: \\"' + config.include_prs_label + '\\") ' + \
             '{ nodes { number, labels(first: 20) { nodes { name } } } } } } }'
     post_body = '''
     {
@@ -250,7 +254,7 @@ def list_labeled_PRs():
         pr_number = node['number']
         pr_labels = []
         labels = node['labels']['nodes']
-        ptn = re.compile(f"(?i)({LBL_BUMP_SER_VER_ID}|{include_pr_label})")
+        ptn = re.compile(f"(?i)({LBL_BUMP_SER_VER_ID}|{config.include_prs_label})")
         for label in labels:
             lblName = label['name']
             if(ptn.match(lblName)):
@@ -272,11 +276,11 @@ def resolve_new_ser_ver_id():
     # are the same, then the serialization version id should be the same.
     if(not update_ser_ver_id):
         info("  - Find ancestor serialization version id ...")
-        output = git('log', '-20', '--format=oneline', qualified_branch(release_branch)).stdout
+        output = git('log', '-20', '--format=oneline', qualified_branch(config.release_branch)).stdout
         for line in output.splitlines():
             ancestor_hash = line.split()[0]
             ancestor_ser_ver_id = read_ser_ver_id_from_pom_file(ancestor_hash)
-            if(not ancestor_ser_ver_id.startswith(release_ser_prefix)):
+            if(not ancestor_ser_ver_id.startswith(config.ser_ver_id_prefix)):
                 break
 
         info(f"  - Find base serialization version id ...")
@@ -298,20 +302,20 @@ def print_setup():
     info(f"  - Dry run enabled ......... : {dry_run}")
     info(f"  - Debugging enabled ....... : {debugging}")
     info(f"Upstream Git repo")
-    info(f"  - Remote name ............. : {upstream_remote}")
+    info(f"  - Remote name ............. : {config.upstream_remote}")
     info(f"Base for this release")
     info(f"  - Revision ................ : {base_revision}")
     info(f"Release")
-    info(f"  - Remote Git repo ......... : {release_remote}")
-    info(f"  - Branch .................. : {qualified_branch(release_branch)}")
-    info(f"  - Configuration branch .... : {qualified_branch(config_branch)}")
-    info(f"  - Ser.ver.prefix .......... : {release_ser_prefix}")
+    info(f"  - Remote Git repo ......... : {config.release_remote}")
+    info(f"  - Branch .................. : {qualified_branch(config.release_branch)}")
+    info(f"  - Configuration branch .... : {qualified_branch(config.config_branch)}")
+    info(f"  - Ser.ver.prefix .......... : {config.ser_ver_id_prefix}")
     info(f"  - Project main version .... : {main_version}")
     info(f"  - Current full version .... : {current_full_version}")
     info(f"  - New full version ........ : {new_full_version}")
     info(f"  - Ser.ver.id incremented .. : {update_ser_ver_id}")
     info(f"  - New ser.ver.id .......... : {new_ser_ver_id}")
-    if(include_pr_label):
+    if(config.include_prs_label):
         info(f"PRs to merge")
     for pr in pr_to_merge:
         info(f"  - {pr} with labels {pr_to_merge[pr]}")
@@ -335,11 +339,11 @@ def make_git_tag(version):
 
 # Fully qualified  branch name in release remote repo
 def qualified_branch(branch):
-    return f"{release_remote}/{branch}"
+    return f"{config.release_remote}/{branch}"
 
 def make_new_ser_ver_id(currentId):
     value = int(currentId[3:])
-    v = release_ser_prefix + "-{:04d}".format(value + 1)
+    v = config.ser_ver_id_prefix + "-{:04d}".format(value + 1)
     debug(v)
     return v
 
@@ -469,7 +473,6 @@ def help():
       # script/prepare_release.py --hotfix --serVerId
     """)
     exit(0)
-
 
 if __name__ == "__main__":
     main()
