@@ -160,7 +160,7 @@ def merge_in_labeled_PRs():
     for pr in state.prs_to_merge:
         # A temp branch is needed here since the PR is in the upstream remote repo
         temp_branch=f'temp-pullrequest-{pr}'
-        if(section_w_resume(temp_branch, "Merge in PR #{pr}")):
+        if(section_w_resume(temp_branch, f'Merge in PR #{pr}')):
             git('fetch', config.upstream_remote, f'pull/{pr}/head:{temp_branch}')
             git_im('merge', temp_branch)
             git('branch', '-D', temp_branch)
