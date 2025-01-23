@@ -1,0 +1,24 @@
+name: Build, Tag & Release OTP JAR
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: 'The OTP version'
+        value: ${{ jobs.release-otp.outputs.version }}
+      ser_ver_id:
+        description: 'The OTP serialization id'
+        value: ${{ jobs.release-otp.outputs.ser_ver_id }}
+jobs:
+  release-otp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{steps.build_otp.outputs.version}}
+      ser_ver_id: ${{steps.build_otp.outputs.ser_ver_id}}
+    steps:
+      - name: Build OTP
+        id: build_otp
+        run: |
+          echo "Build OTP"
+          echo "version=v2.7.0-entur-45" >> $GITHUB_OUTPUT
+          echo "ser_ver_id=EN-00090" >> $GITHUB_OUTPUT

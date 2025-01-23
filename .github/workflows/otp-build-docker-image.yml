@@ -1,0 +1,23 @@
+name: "Build and publish Docker image"
+run-name: "Docker image ${{inputs.version}}"
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "The OTP version"
+        default: "<not set>"
+        required: false
+        type: string
+      ser_ver_id:
+        description: "The OTP serialization id"
+        default: "<not set>"
+        required: false
+        type: string
+jobs:
+  build-docker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Docker image
+        run: echo "Build Docker image ${{ inputs.version }} (${{ inputs.ser_ver_id }})"
+      - name: Publish Docker image
+        run: echo "Publish Docker image ${{ inputs.version }} (${{ inputs.ser_ver_id }})"
