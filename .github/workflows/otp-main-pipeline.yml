@@ -1,7 +1,9 @@
 name: OTP Pipline
-run-name: "OTP Pipline - v${{needs.release-otp.outputs.version}} (${{needs.release-otp.outputs.ser_ver_id}})"
+run-name: "OTP Pipline - v${{env.OTP_VERSION}})"
 on:
   workflow_dispatch:
+env:
+  OTP_VERSION: ${{needs.release-otp.outputs.version}}
 jobs:
   release-otp:
     name: "Build, test, tag & release OTP"
@@ -16,7 +18,7 @@ jobs:
       ser_ver_id: ${{needs.release-otp.outputs.ser_ver_id}}
 
   deploy-otp-dev:
-    name: Deploy OTP
+    name: Deploy OTP to DEV
     uses: ./.github/workflows/otp-deploy-pipeline.yml
     needs: [release-otp, build-docker-image]
     with:
@@ -25,7 +27,7 @@ jobs:
       target: dev
 
   deploy-otp-test:
-    name: Deploy OTP
+    name: Deploy OTP to TEST
     uses: ./.github/workflows/otp-deploy-pipeline.yml
     needs: [release-otp, build-docker-image]
     with:
