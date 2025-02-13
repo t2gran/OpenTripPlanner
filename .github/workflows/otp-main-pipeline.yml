@@ -1,5 +1,5 @@
 name: OTP Pipline
-run-name: "OTP Pipline - v${{OTP_VERSION}})"
+run-name: "OTP Pipline ${{github.ref_name}}"
 on:
   workflow_dispatch:
 env:
