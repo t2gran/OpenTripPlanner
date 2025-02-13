@@ -1,4 +1,5 @@
 name: OTP Pipline
+run-name: "OTP Pipline - v${{needs.release-otp.outputs.version}} (${{needs.release-otp.outputs.ser_ver_id}})"
 on:
   workflow_dispatch:
 jobs:
